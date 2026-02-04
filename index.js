@@ -10,7 +10,7 @@ const app = express();
 const PORT = process.env.PORT || 5000;
 const downloadsDir = process.env.DOWNLOADS_DIR
   ? path.resolve(process.env.DOWNLOADS_DIR)
-  : path.join(__dirname, 'downloads');
+  : (process.env.RENDER ? '/tmp/downloads' : path.join(__dirname, 'downloads'));
 
 app.use(cors());
 app.use(express.json());
