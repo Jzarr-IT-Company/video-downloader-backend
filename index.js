@@ -6,13 +6,19 @@ const fs = require('fs');
 
 const app = express();
 
+// Read port and downloads directory from environment (for Docker/hosting)
+const PORT = process.env.PORT || 5000;
+const downloadsDir = process.env.DOWNLOADS_DIR
+  ? path.resolve(process.env.DOWNLOADS_DIR)
+  : path.join(__dirname, 'downloads');
+
 app.use(cors());
 app.use(express.json());
 
-app.use('/downloads', express.static(path.join(__dirname, 'downloads')));
+// Serve downloads from the configured directory
+app.use('/downloads', express.static(downloadsDir));
 
 // Ensure downloads directory exists
-const downloadsDir = path.join(__dirname, 'downloads');
 if (!fs.existsSync(downloadsDir)) {
   fs.mkdirSync(downloadsDir, { recursive: true });
 }
@@ -42,7 +48,8 @@ app.post('/download', (req, res) => {
   const isAudio = format === 'audio';
   const timestamp = Date.now();
   const ext = isAudio ? 'mp3' : 'mp4';
-  const output = `downloads/video_${timestamp}.${ext}`;
+  const filename = `video_${timestamp}.${ext}`;
+  const output = path.join(downloadsDir, filename);
 
   let options = '';
   if (isAudio) {
@@ -83,7 +90,7 @@ app.post('/download', (req, res) => {
     }
 
     // List files in downloads folder for debugging
-    fs.readdir(path.join(__dirname, 'downloads'), (err, files) => {
+    fs.readdir(downloadsDir, (err, files) => {
       if (err) {
         console.error('Error reading downloads folder:', err);
       } else {
@@ -105,11 +112,13 @@ app.post('/download', (req, res) => {
 
 app.get('/force-download/:filename', (req, res) => {
   const filename = path.basename(req.params.filename); // Prevent directory traversal
-  const filePath = path.join(__dirname, 'downloads', filename);
+  const filePath = path.join(downloadsDir, filename);
   if (!fs.existsSync(filePath)) {
     return res.status(404).send('File not found');
   }
   res.download(filePath);
 });
 
-app.listen(5000, () => console.log('🚀 Server running on http://localhost:5000'));
+app.listen(PORT, () =>
+  console.log(`🚀 Server running on http://localhost:${PORT}`)
+);

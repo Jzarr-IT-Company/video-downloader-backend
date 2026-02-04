@@ -1,26 +1,26 @@
-FROM node:18-slim
+FROM node:20-slim
 
-# Install ffmpeg and yt-dlp
+# Install ffmpeg, Python and yt-dlp
 RUN apt-get update && \
-    apt-get install -y ffmpeg curl && \
-    curl -L https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp -o /usr/local/bin/yt-dlp && \
-    chmod a+rx /usr/local/bin/yt-dlp
+    apt-get install -y --no-install-recommends ffmpeg python3 python3-pip && \
+    pip3 install --no-cache-dir yt-dlp && \
+    rm -rf /var/lib/apt/lists/*
 
-# Set working directory
 WORKDIR /app
 
-# Copy package files and install dependencies
+# Install Node dependencies
 COPY package*.json ./
-RUN npm install
+RUN npm install --only=production
 
-# Copy app source
+# Copy the rest of the app
 COPY . .
 
-# Create downloads directory
-RUN mkdir -p downloads
+# Ensure downloads directory exists in container
+RUN mkdir -p server/downloads
 
-# Expose port
+ENV NODE_ENV=production
+ENV PORT=5000
+
 EXPOSE 5000
 
-# Start the server
-CMD ["node", "index.js"]
+CMD ["node", "server/index.js"]
