@@ -17,6 +17,9 @@ if (!fs.existsSync(downloadsDir)) {
   fs.mkdirSync(downloadsDir, { recursive: true });
 }
 
+// Absolute path to cookies file
+const cookiesPath = path.join(__dirname, 'cookies.txt');
+
 app.post('/download', (req, res) => {
   const { videoUrl, format, quality } = req.body;
   if (!videoUrl || typeof videoUrl !== "string") {
@@ -59,13 +62,19 @@ app.post('/download', (req, res) => {
   }
 
   const ytDlp = 'yt-dlp';
-  const ffmpeg = 'ffmpeg';
 
-  const cookies = '--cookies cookies.txt';
-  const jsRuntime = '--js-runtime node';
-  const command = `${ytDlp} --ffmpeg-location ${ffmpeg} ${options} ${cookies} ${jsRuntime} -o "${output}" "${videoUrl}"`;
+  // Only add cookies arg if the file exists
+  const cookiesArg = fs.existsSync(cookiesPath)
+    ? `--cookies "${cookiesPath}"`
+    : '';
+
+  // NOTE:
+  // - Do NOT force --ffmpeg-location ffmpeg (that path may not exist on Render)
+  // - Do NOT pass --js-runtime node (yt-dlp expects --js-runtimes and proper config)
+  const command = `${ytDlp} ${options} ${cookiesArg} -o "${output}" "${videoUrl}"`;
 
   exec(command, (err, stdout, stderr) => {
+    console.log('yt-dlp command:', command);
     console.log('yt-dlp stdout:', stdout);
     console.log('yt-dlp stderr:', stderr);
     if (err) {
