@@ -315,6 +315,21 @@ app.post("/download", async (req, res) => {
     const isBotCheck =
       stderrText.includes("sign in to confirm you") &&
       stderrText.includes("not a bot");
+    const isDailymotionHostBlocked =
+      stderrText.includes("[dailymotion]") &&
+      (stderrText.includes("http error 403") ||
+        stderrText.includes("forbidden") ||
+        stderrText.includes("access denied") ||
+        stderrText.includes("unable to download webpage"));
+    const isGeoRestricted =
+      stderrText.includes("geo restricted") ||
+      stderrText.includes("geo-restricted") ||
+      stderrText.includes("not available in your country") ||
+      stderrText.includes("not available from your location");
+    const isExtractorMismatch =
+      stderrText.includes("unable to extract") ||
+      stderrText.includes("unsupported url") ||
+      stderrText.includes("please report this issue");
     const isInstagramRateLimited =
       stderrText.includes("[instagram]") &&
       (stderrText.includes("rate-limit reached") ||
@@ -334,12 +349,39 @@ app.post("/download", async (req, res) => {
       });
     }
 
+    if (isDailymotionHostBlocked) {
+      return res.status(403).send({
+        error:
+          "Dailymotion is blocking this request from the hosted server IP. This may work locally but fail on cloud hosting.",
+        details: result.stderr,
+        code: "DAILYMOTION_HOST_BLOCK",
+      });
+    }
+
+    if (isGeoRestricted) {
+      return res.status(451).send({
+        error:
+          "This video is geo-restricted for the current server location. Try another video or deploy backend in a different region.",
+        details: result.stderr,
+        code: "GEO_RESTRICTED",
+      });
+    }
+
     if (isInstagramRateLimited) {
       return res.status(429).send({
         error:
           "Instagram blocked this request on the hosted server (rate-limit/login required). Configure authenticated cookies for yt-dlp or try again later.",
         details: result.stderr,
         code: "INSTAGRAM_AUTH_REQUIRED",
+      });
+    }
+
+    if (isExtractorMismatch) {
+      return res.status(502).send({
+        error:
+          "Extractor/runtime mismatch on hosted backend. Update yt-dlp and redeploy backend image.",
+        details: result.stderr,
+        code: "EXTRACTOR_MISMATCH",
       });
     }
 
