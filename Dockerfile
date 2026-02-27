@@ -1,8 +1,9 @@
 FROM node:20-slim
 
-# Install ffmpeg, Python and yt-dlp from Debian repos
+# Install ffmpeg + Python and keep yt-dlp on latest release.
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends ffmpeg python3 yt-dlp && \
+    apt-get install -y --no-install-recommends ffmpeg python3 python3-pip && \
+    python3 -m pip install --no-cache-dir --break-system-packages -U yt-dlp && \
     rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app

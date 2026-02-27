@@ -48,6 +48,39 @@ app.use("/downloads", express.static(downloadsDir));
 const cookiesPath = path.join(__dirname, "cookies.txt");
 const allowedQualities = new Set(["480p", "720p", "1080p", "max1080p"]);
 
+function normalizeVideoUrl(inputUrl) {
+  try {
+    const parsed = new URL(inputUrl);
+    const host = parsed.hostname.toLowerCase();
+    const segments = parsed.pathname.split("/").filter(Boolean);
+
+    // Facebook share links often fail in yt-dlp as-is on hosted runtimes.
+    // Convert common share forms to canonical URLs before download.
+    if (host.endsWith("facebook.com")) {
+      if (segments.length >= 3 && segments[0] === "share" && segments[1] === "v") {
+        return `https://www.facebook.com/watch/?v=${encodeURIComponent(segments[2])}`;
+      }
+
+      if (segments.length >= 3 && segments[0] === "share" && segments[1] === "r") {
+        return `https://www.facebook.com/reel/${encodeURIComponent(segments[2])}`;
+      }
+    }
+  } catch {
+    return inputUrl;
+  }
+
+  return inputUrl;
+}
+
+function buildVideoUrlCandidates(inputUrl) {
+  const candidates = [inputUrl];
+  const normalized = normalizeVideoUrl(inputUrl);
+  if (normalized !== inputUrl) {
+    candidates.push(normalized);
+  }
+  return candidates;
+}
+
 function buildVideoFormat(quality) {
   if (quality === "480p") return "bestvideo[height<=480]+bestaudio/best[height<=480]";
   if (quality === "720p") return "bestvideo[height<=720]+bestaudio/best[height<=720]";
@@ -75,6 +108,61 @@ function scheduleCleanup(filePath) {
   }
 }
 
+function buildYtArgs({ isAudio, quality, outputPath, videoUrl }) {
+  const ytArgs = [];
+
+  if (isAudio) {
+    ytArgs.push("--extract-audio", "--audio-format", "mp3");
+  } else {
+    ytArgs.push("--format", buildVideoFormat(quality), "--merge-output-format", "mp4");
+  }
+
+  if (fs.existsSync(cookiesPath)) {
+    ytArgs.push("--cookies", cookiesPath);
+  }
+
+  ytArgs.push("-o", outputPath, videoUrl);
+  return ytArgs;
+}
+
+function runYtDlp(ytArgs) {
+  return new Promise((resolve) => {
+    const child = spawn("yt-dlp", ytArgs, { shell: false });
+    let stdout = "";
+    let stderr = "";
+    let timedOut = false;
+
+    const timeout = setTimeout(() => {
+      timedOut = true;
+      child.kill("SIGKILL");
+    }, DOWNLOAD_TIMEOUT_MS);
+
+    child.stdout.on("data", (chunk) => {
+      stdout += chunk.toString();
+    });
+
+    child.stderr.on("data", (chunk) => {
+      stderr += chunk.toString();
+    });
+
+    child.on("error", (error) => {
+      clearTimeout(timeout);
+      resolve({ code: -1, stdout, stderr, error, timedOut: false });
+    });
+
+    child.on("close", (code) => {
+      clearTimeout(timeout);
+      resolve({
+        code: typeof code === "number" ? code : 1,
+        stdout,
+        stderr,
+        error: null,
+        timedOut,
+      });
+    });
+  });
+}
+
 app.get("/", (req, res) => {
   res.json({ status: "ok", service: "video-downloader-api" });
 });
@@ -83,11 +171,16 @@ app.get("/health", (req, res) => {
   res.json({ status: "ok" });
 });
 
-app.post("/download", (req, res) => {
+app.post("/download", async (req, res) => {
   const { videoUrl, format, quality } = req.body || {};
 
   if (!videoUrl || typeof videoUrl !== "string") {
     return res.status(400).send({ error: "Invalid or missing videoUrl" });
+  }
+
+  const urlCandidates = buildVideoUrlCandidates(videoUrl);
+  if (urlCandidates.length > 1) {
+    console.log("video URL candidates:", urlCandidates);
   }
 
   let parsedUrl;
@@ -115,81 +208,106 @@ app.post("/download", (req, res) => {
   const filename = `video_${fileId}.${fileExt}`;
   const outputPath = path.join(downloadsDir, filename);
 
-  const ytArgs = [];
-  if (isAudio) {
-    ytArgs.push("--extract-audio", "--audio-format", "mp3");
-  } else {
-    ytArgs.push("--format", buildVideoFormat(quality), "--merge-output-format", "mp4");
-  }
+  let warning;
+  let result = null;
+  let successfulCandidateUrl = null;
+  let lastRequestedFormatUnavailable = false;
 
-  if (fs.existsSync(cookiesPath)) {
-    ytArgs.push("--cookies", cookiesPath);
-  }
+  for (const candidateUrl of urlCandidates) {
+    result = await runYtDlp(
+      buildYtArgs({ isAudio, quality, outputPath, videoUrl: candidateUrl }),
+    );
 
-  ytArgs.push("-o", outputPath, videoUrl);
+    if (result.error) {
+      console.error("yt-dlp spawn error:", result.error.message);
+      return res.status(500).send({ error: "Downloader process failed to start" });
+    }
 
-  const child = spawn("yt-dlp", ytArgs, { shell: false });
-  let stdout = "";
-  let stderr = "";
-  let hasResponded = false;
+    if (result.timedOut) {
+      return res.status(504).send({ error: "Download timed out" });
+    }
 
-  const replyOnce = (statusCode, payload) => {
-    if (hasResponded) return;
-    hasResponded = true;
-    res.status(statusCode).send(payload);
-  };
+    if (result.code === 0) {
+      successfulCandidateUrl = candidateUrl;
+      break;
+    }
 
-  const timeout = setTimeout(() => {
-    child.kill("SIGKILL");
-    replyOnce(504, { error: "Download timed out" });
-  }, DOWNLOAD_TIMEOUT_MS);
+    const stderrText = (result.stderr || "").toLowerCase();
+    const requestedFormatUnavailable = stderrText.includes("requested format is not available");
+    lastRequestedFormatUnavailable = requestedFormatUnavailable;
 
-  child.stdout.on("data", (chunk) => {
-    stdout += chunk.toString();
-  });
+    // Some sources don't expose all requested heights.
+    // Retry this candidate with best available quality before trying next candidate.
+    if (!isAudio && quality && requestedFormatUnavailable) {
+      const fallbackResult = await runYtDlp(
+        buildYtArgs({ isAudio, quality: undefined, outputPath, videoUrl: candidateUrl }),
+      );
 
-  child.stderr.on("data", (chunk) => {
-    stderr += chunk.toString();
-  });
-
-  child.on("error", (err) => {
-    clearTimeout(timeout);
-    console.error("yt-dlp spawn error:", err.message);
-    replyOnce(500, { error: "Downloader process failed to start" });
-  });
-
-  child.on("close", (code) => {
-    clearTimeout(timeout);
-
-    if (code !== 0) {
-      const stderrText = stderr.toLowerCase();
-      const isBotCheck =
-        stderrText.includes("sign in to confirm you") &&
-        stderrText.includes("not a bot");
-
-      console.error("yt-dlp error code:", code);
-      console.error("yt-dlp stderr:", stderr);
-      console.error("yt-dlp stdout:", stdout);
-
-      if (isBotCheck) {
-        return replyOnce(403, {
-          error:
-            "YouTube is blocking downloads from this server (bot protection). This may work from your local network but not from this hosting provider.",
-          details: stderr,
-        });
+      if (fallbackResult.error) {
+        console.error("yt-dlp spawn error:", fallbackResult.error.message);
+        return res.status(500).send({ error: "Downloader process failed to start" });
       }
 
-      return replyOnce(500, { error: "Download failed", details: stderr || stdout });
+      if (fallbackResult.timedOut) {
+        return res.status(504).send({ error: "Download timed out" });
+      }
+
+      if (fallbackResult.code === 0) {
+        warning = `Requested quality (${quality}) is not available for this video. Downloaded best available quality instead.`;
+        result = fallbackResult;
+        successfulCandidateUrl = candidateUrl;
+        break;
+      }
+
+      result = fallbackResult;
+    }
+  }
+
+  if (!result) {
+    return res.status(500).send({ error: "Download failed: no downloader result" });
+  }
+
+  if (result.code !== 0) {
+    const stderrText = (result.stderr || "").toLowerCase();
+    const isBotCheck =
+      stderrText.includes("sign in to confirm you") &&
+      stderrText.includes("not a bot");
+
+    console.error("yt-dlp error code:", result.code);
+    console.error("yt-dlp stderr:", result.stderr);
+    console.error("yt-dlp stdout:", result.stdout);
+
+    if (isBotCheck) {
+      return res.status(403).send({
+        error:
+          "YouTube is blocking downloads from this server (bot protection). This may work from your local network but not from this hosting provider.",
+        details: result.stderr,
+      });
     }
 
-    if (!fs.existsSync(outputPath)) {
-      return replyOnce(500, { error: "File not found after download" });
-    }
+    const details = result.stderr || result.stdout;
+    const extraNote =
+      lastRequestedFormatUnavailable && quality
+        ? ` Requested quality (${quality}) is unavailable.`
+        : "";
+    return res.status(500).send({
+      error: `Download failed.${extraNote}`,
+      details,
+      triedUrls: urlCandidates,
+    });
+  }
 
-    const file = `/downloads/${path.basename(outputPath)}`;
-    scheduleCleanup(outputPath);
-    return replyOnce(200, { file });
-  });
+  if (!fs.existsSync(outputPath)) {
+    return res.status(500).send({ error: "File not found after download" });
+  }
+
+  if (successfulCandidateUrl && successfulCandidateUrl !== videoUrl) {
+    warning = warning || "Original share URL was converted to a canonical URL for download.";
+  }
+
+  const file = `/downloads/${path.basename(outputPath)}`;
+  scheduleCleanup(outputPath);
+  return res.status(200).send({ file, warning });
 });
 
 app.get("/force-download/:filename", (req, res) => {
