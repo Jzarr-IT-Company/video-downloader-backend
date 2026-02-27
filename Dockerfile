@@ -12,7 +12,7 @@ RUN npm install --only=production
 
 COPY . .
 
-RUN mkdir -p server/downloads
+RUN mkdir -p downloads
 
 ENV NODE_ENV=production
 ENV PORT=5000
