@@ -45,8 +45,41 @@ if (!fs.existsSync(downloadsDir)) {
 
 app.use("/downloads", express.static(downloadsDir));
 
-const cookiesPath = path.join(__dirname, "cookies.txt");
+const fileCookiesPath = path.join(__dirname, "cookies.txt");
+const runtimeCookiesPath = path.join(__dirname, ".cookies.runtime.txt");
 const allowedQualities = new Set(["480p", "720p", "1080p", "max1080p"]);
+
+function bootstrapCookiesFromEnv() {
+  const cookiesBase64 = process.env.YTDLP_COOKIES_B64;
+  const cookiesRaw = process.env.YTDLP_COOKIES;
+
+  if (!cookiesBase64 && !cookiesRaw) {
+    return;
+  }
+
+  try {
+    const content = cookiesBase64
+      ? Buffer.from(cookiesBase64, "base64").toString("utf8")
+      : cookiesRaw;
+
+    fs.writeFileSync(runtimeCookiesPath, content, { encoding: "utf8", mode: 0o600 });
+    console.log("Runtime cookies file prepared from environment.");
+  } catch (err) {
+    console.error("Failed to create runtime cookies file:", err.message);
+  }
+}
+
+function resolveCookiesPath() {
+  if (fs.existsSync(runtimeCookiesPath)) {
+    return runtimeCookiesPath;
+  }
+  if (fs.existsSync(fileCookiesPath)) {
+    return fileCookiesPath;
+  }
+  return null;
+}
+
+bootstrapCookiesFromEnv();
 
 function normalizeVideoUrl(inputUrl) {
   try {
@@ -64,6 +97,15 @@ function normalizeVideoUrl(inputUrl) {
       if (segments.length >= 3 && segments[0] === "share" && segments[1] === "r") {
         return `https://www.facebook.com/reel/${encodeURIComponent(segments[2])}`;
       }
+    }
+
+    // Normalize x.com links to twitter.com canonical URLs.
+    // yt-dlp can handle both, but twitter.com is often more stable.
+    if (host === "x.com" || host === "www.x.com") {
+      if (segments.length >= 3 && segments[0] === "i" && segments[1] === "status") {
+        return `https://twitter.com/i/status/${encodeURIComponent(segments[2])}`;
+      }
+      return `https://twitter.com${parsed.pathname}${parsed.search}`;
     }
   } catch {
     return inputUrl;
@@ -117,7 +159,8 @@ function buildYtArgs({ isAudio, quality, outputPath, videoUrl }) {
     ytArgs.push("--format", buildVideoFormat(quality), "--merge-output-format", "mp4");
   }
 
-  if (fs.existsSync(cookiesPath)) {
+  const cookiesPath = resolveCookiesPath();
+  if (cookiesPath) {
     ytArgs.push("--cookies", cookiesPath);
   }
 
@@ -272,6 +315,12 @@ app.post("/download", async (req, res) => {
     const isBotCheck =
       stderrText.includes("sign in to confirm you") &&
       stderrText.includes("not a bot");
+    const isInstagramRateLimited =
+      stderrText.includes("[instagram]") &&
+      (stderrText.includes("rate-limit reached") ||
+        stderrText.includes("login required") ||
+        stderrText.includes("requested content is not available") ||
+        stderrText.includes("use --cookies"));
 
     console.error("yt-dlp error code:", result.code);
     console.error("yt-dlp stderr:", result.stderr);
@@ -282,6 +331,15 @@ app.post("/download", async (req, res) => {
         error:
           "YouTube is blocking downloads from this server (bot protection). This may work from your local network but not from this hosting provider.",
         details: result.stderr,
+      });
+    }
+
+    if (isInstagramRateLimited) {
+      return res.status(429).send({
+        error:
+          "Instagram blocked this request on the hosted server (rate-limit/login required). Configure authenticated cookies for yt-dlp or try again later.",
+        details: result.stderr,
+        code: "INSTAGRAM_AUTH_REQUIRED",
       });
     }
 
