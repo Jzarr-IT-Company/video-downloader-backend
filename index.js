@@ -47,7 +47,7 @@ app.use("/downloads", express.static(downloadsDir));
 
 const fileCookiesPath = path.join(__dirname, "cookies.txt");
 const runtimeCookiesPath = path.join(__dirname, ".cookies.runtime.txt");
-const allowedQualities = new Set(["480p", "720p", "1080p", "max1080p"]);
+const allowedQualities = new Set(["720p"]);
 
 function bootstrapCookiesFromEnv() {
   const cookiesBase64 = process.env.YTDLP_COOKIES_B64;
@@ -215,7 +215,7 @@ app.get("/health", (req, res) => {
 });
 
 app.post("/download", async (req, res) => {
-  const { videoUrl, format, quality } = req.body || {};
+  const { videoUrl, format, quality: requestedQuality } = req.body || {};
 
   if (!videoUrl || typeof videoUrl !== "string") {
     return res.status(400).send({ error: "Invalid or missing videoUrl" });
@@ -241,11 +241,12 @@ app.post("/download", async (req, res) => {
     return res.status(400).send({ error: "Invalid format" });
   }
 
-  if (quality && !allowedQualities.has(quality)) {
+  if (requestedQuality && !allowedQualities.has(requestedQuality)) {
     return res.status(400).send({ error: "Invalid quality" });
   }
 
   const isAudio = format === "audio";
+  const quality = isAudio ? undefined : "720p";
   const fileExt = isAudio ? "mp3" : "mp4";
   const fileId = `${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
   const filename = `video_${fileId}.${fileExt}`;
